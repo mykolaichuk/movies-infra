@@ -1,0 +1,8 @@
+# Step 4 of the bootstrap runbook: rename this file to backend.tf, then
+#   terraform init -migrate-state -backend-config=../backend.hcl -backend-config="key=bootstrap.tfstate"
+# The first apply has to run with local state, because the account that
+# stores state does not exist yet.
+
+terraform {
+  backend "azurerm" {}
+}

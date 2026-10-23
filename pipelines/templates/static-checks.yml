@@ -1,0 +1,53 @@
+# Static checks shared by validate.yml and infra.yml.
+# Nothing here talks to Azure or to Terraform state: safe for any branch/PR.
+# Triggers cannot live in templates (Azure Pipelines rule); they stay in the
+# pipelines that include this file.
+
+parameters:
+  # Terraform root modules to init (without backend) and validate.
+  - name: terraformDirs
+    type: object
+    default: [stack]
+
+steps:
+  - checkout: self
+    fetchDepth: 0 # gitleaks scans the whole history
+
+  # The agent is immutable (bootstrap cloud-init). If it is incomplete,
+  # fail here with a clear list instead of halfway through a stage.
+  - script: |
+      missing=""
+      for t in az terraform node npx tflint gitleaks checkov jq; do
+        command -v "$t" >/dev/null || missing="$missing $t"
+      done
+      if [ -n "$missing" ]; then
+        echo "##vso[task.logissue type=error]Agent toolchain incomplete, missing:$missing. Fix bootstrap cloud-init and replace the agent (bootstrap/README.md)."
+        exit 1
+      fi
+      echo "Agent toolchain OK"
+    displayName: Preflight (agent toolchain)
+
+  - script: gitleaks git --redact --verbose --exit-code 1 .
+    displayName: gitleaks (secret scanning)
+
+  - script: terraform fmt -check -recursive -diff
+    displayName: terraform fmt
+
+  - script: npx --yes markdownlint-cli2@0.23.3 "**/*.md"
+    displayName: markdownlint (docs)
+
+  - ${{ each dir in parameters.terraformDirs }}:
+      - script: |
+          set -euo pipefail
+          terraform -chdir="${{ dir }}" init -backend=false -input=false
+          terraform -chdir="${{ dir }}" validate
+        displayName: terraform validate (${{ dir }})
+
+      - script: |
+          set -euo pipefail
+          tflint --init --config="$(Build.SourcesDirectory)/.tflint.hcl"
+          tflint --chdir="${{ dir }}" --config="$(Build.SourcesDirectory)/.tflint.hcl" --format=compact
+        displayName: tflint (${{ dir }})
+
+  - script: checkov --directory . --framework terraform --compact --quiet
+    displayName: checkov (IaC security)

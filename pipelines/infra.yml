@@ -1,0 +1,163 @@
+# movies-infra: stack layer
+#
+#   Validate  static checks (pipelines/templates/static-checks.yml)
+#   Plan      terraform plan, saved on the agent (never published)
+#   Apply     approval on environment 'movies-infra', then apply  (main only, only if the plan has changes)
+#   Outputs   non-sensitive outputs -> artifact 'stack-outputs'  (main only)
+#
+# Every job runs on the self-hosted agent in the hub VNet: state, Key Vault
+# and SQL are reachable only through private endpoints. Terraform
+# authenticates with the agent's managed identity (agent .env).
+# No pipeline variables or secrets: third-party secrets go straight to
+# Key Vault through pipelines/set-secret.yml.
+
+name: infra-$(Date:yyyyMMdd)$(Rev:.r)
+
+# Only files that change what Terraform applies. Docs (stack/README.md),
+# bootstrap code and linter configs are checked by validate.yml instead.
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include:
+      - stack/*.tf
+      - stack/settings.tfvars
+      - stack/.terraform.lock.hcl
+      - backend.hcl
+      - pipelines/infra.yml
+      - pipelines/templates/static-checks.yml
+
+# Azure Repos ignores YAML 'pr' triggers. For plan-on-PR, add this pipeline
+# as a "Build validation" branch policy with the same path filter
+# (pipelines/README.md). Apply never runs outside main.
+
+pool:
+  name: movies-pool
+
+variables:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  STACK_DIR: $(Build.SourcesDirectory)/stack
+  # Plans contain secret values in clear text. They stay on the single agent,
+  # outside the job workspace, and are deleted after apply. Never an artifact.
+  PLAN_FILE: /home/azdo/plans/stack-$(Build.BuildId).tfplan
+
+stages:
+  # ---------------------------------------------------------------------------
+  - stage: Validate
+    displayName: Validate and scan
+    jobs:
+      - job: static
+        displayName: Static checks
+        steps:
+          - template: templates/static-checks.yml
+            parameters:
+              terraformDirs: [stack]
+
+  # ---------------------------------------------------------------------------
+  - stage: Plan
+    dependsOn: Validate
+    jobs:
+      - job: plan
+        displayName: terraform plan
+        steps:
+          - checkout: self
+
+          # Demonstrates the workload identity federation service connection:
+          # Azure DevOps issues an OIDC token, Entra ID trusts it, no secret.
+          - task: AzureCLI@2
+            displayName: Verify service connection (WIF)
+            inputs:
+              azureSubscription: sc-movies-azure
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: az account show --query "{subscription:name, tenant:tenantId, identity:user.name}" -o table
+
+          - script: |
+              set -euo pipefail
+              mkdir -p "$(dirname "$PLAN_FILE")"
+              SA=$(sed -n 's/^storage_account_name *= *"\(.*\)"/\1/p' backend.hcl)
+              export TF_VAR_tfstate_storage_account="$SA"
+
+              terraform -chdir="$STACK_DIR" init \
+                -backend-config=../backend.hcl \
+                -backend-config="key=stack.tfstate"
+
+              set +e
+              terraform -chdir="$STACK_DIR" plan \
+                -var-file=settings.tfvars \
+                -out="$PLAN_FILE" \
+                -detailed-exitcode
+              rc=$?
+              set -e
+
+              case $rc in
+                0) echo "##vso[task.setvariable variable=hasChanges;isOutput=true]false" ;;
+                2) echo "##vso[task.setvariable variable=hasChanges;isOutput=true]true" ;;
+                *) exit $rc ;;
+              esac
+            name: tfplan
+            displayName: terraform plan
+
+  # ---------------------------------------------------------------------------
+  - stage: Apply
+    dependsOn: Plan
+    condition: >-
+      and(
+        succeeded(),
+        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        eq(dependencies.Plan.outputs['plan.tfplan.hasChanges'], 'true')
+      )
+    jobs:
+      - deployment: apply
+        displayName: terraform apply
+        environment: movies-infra # approval check (bootstrap/azdo.tf)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - script: |
+                    set -euo pipefail
+                    SA=$(sed -n 's/^storage_account_name *= *"\(.*\)"/\1/p' backend.hcl)
+                    export TF_VAR_tfstate_storage_account="$SA"
+
+                    terraform -chdir="$STACK_DIR" init \
+                      -backend-config=../backend.hcl \
+                      -backend-config="key=stack.tfstate"
+
+                    # Applies exactly the plan that was reviewed and approved.
+                    terraform -chdir="$STACK_DIR" apply "$PLAN_FILE"
+                  displayName: terraform apply (approved plan)
+
+                - script: rm -f "$PLAN_FILE"
+                  displayName: Delete plan file
+                  condition: always()
+
+  # ---------------------------------------------------------------------------
+  - stage: Outputs
+    dependsOn: Apply
+    condition: and(in(dependencies.Apply.result, 'Succeeded', 'Skipped'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: outputs
+        displayName: Export non-sensitive outputs
+        steps:
+          - checkout: self
+
+          - script: |
+              set -euo pipefail
+              terraform -chdir="$STACK_DIR" init \
+                -backend-config=../backend.hcl \
+                -backend-config="key=stack.tfstate"
+
+              terraform -chdir="$STACK_DIR" output -json \
+                | jq 'with_entries(select(.value.sensitive | not) | .value = .value.value)' \
+                > "$(Build.ArtifactStagingDirectory)/stack-outputs.json"
+
+              jq '{domain_name, dns_name_servers, app_vm}' "$(Build.ArtifactStagingDirectory)/stack-outputs.json"
+            displayName: terraform output
+
+          - publish: $(Build.ArtifactStagingDirectory)/stack-outputs.json
+            artifact: stack-outputs
+            displayName: Publish stack-outputs

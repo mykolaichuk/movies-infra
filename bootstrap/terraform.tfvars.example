@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+# The PAT is NOT set here: export TF_VAR_azdo_pat in the shell instead.
+
+subscription_id      = "00000000-0000-0000-0000-000000000000"
+admin_ssh_public_key = "ssh-ed25519 AAAA... you@laptop"
+approver_email       = "you@example.com"
+azdo_org_url         = "https://dev.azure.com/<organisation>"
+azdo_project_name    = "<project>"
+
+# Defaults, change only if needed:
+# location             = "swedencentral"
+# prefix               = "movies"
+# agent_vm_size        = "Standard_B2pls_v2"

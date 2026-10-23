@@ -1,0 +1,38 @@
+# movies-infra: static checks only (no Azure, no state, no approvals)
+#
+# Runs for everything the infra pipeline deliberately ignores: docs,
+# bootstrap code, linter configs. Also the pipeline to attach as the
+# "Build validation" branch policy on main, so every pull request is
+# checked whatever it touches (see pipelines/README.md).
+
+name: validate-$(Date:yyyyMMdd)$(Rev:.r)
+
+# CI on main, except changes that already run the same checks inside
+# infra.yml (a commit touching both still runs both: that is fine).
+trigger:
+  branches:
+    include: [main]
+  paths:
+    exclude:
+      - stack/*.tf
+      - stack/settings.tfvars
+      - stack/.terraform.lock.hcl
+      - backend.hcl
+      - pipelines/infra.yml
+
+# Azure Repos ignores YAML 'pr' triggers: PR runs come from branch policies.
+
+pool:
+  name: movies-pool
+
+variables:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  - job: static
+    displayName: Static checks
+    steps:
+      - template: templates/static-checks.yml
+        parameters:
+          terraformDirs: [stack, bootstrap]

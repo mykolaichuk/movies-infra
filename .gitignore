@@ -1,0 +1,22 @@
+# Terraform working directories and local state (state and plans hold secrets)
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+*.tfplan
+crash.log
+crash.*.log
+
+# Variable values: subscription, e-mails, keys. Commit only *.example.
+terraform.tfvars
+*.auto.tfvars
+*.auto.tfvars.json
+
+# Local overrides
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# macOS
+.DS_Store
