@@ -83,7 +83,7 @@ sequenceDiagram
     K->>BL: uploadStream in 8 MB blocks
     K->>S: status = ready
     K->>Q: deleteMessage
-    Note over K: on error: retry; after 5 attempts status = failed
+    Note over K: on error: retry, after 5 attempts status = failed
 ```
 
 ## Deploying the app
